@@ -223,9 +223,6 @@ void convex_hull(const points_t *pset, points_t *hull)
     const point_t *p = pset->p;
     int i, j;
     int cur, next, leftmost;
-    /**point_t t1 = {1, 2};
-    point_t t2 = {4, 5};
-    point_t t3 = {10, 9};*/
 
     hull->n = 0;
     /* There can be at most n points in the convex hull. At the end of
@@ -255,7 +252,6 @@ void convex_hull(const points_t *pset, points_t *hull)
         for (j=0; j<n; j++) {
             if (LEFT == turn(p[cur], p[next], p[j])) {
                 next = j;
-                /**cw_angle(t1, t2, t3);*/
             }
         }
         assert(cur != next);
