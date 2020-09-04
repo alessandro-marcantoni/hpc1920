@@ -42,7 +42,7 @@
  * Per eseguire il programma si puo' usare la riga di comando:
  *
  * ./convex-hull < ace.in > ace.hull
- * 
+ *
  * Per visualizzare graficamente i punti e l'inviluppo calcolato è
  * possibile usare lo script di gnuplot (http://www.gnuplot.info/)
  * incluso nella specifica del progetto:
@@ -55,7 +55,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <math.h>
-#include <string.h>
+#include <mpi.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -69,8 +69,7 @@ typedef struct {
 /* An array of n points */
 typedef struct {
     int n;      /* number of points     */
-    double *x;
-    double *y; /* array of points      */
+    point_t *p; /* array of points      */
 } points_t;
 
 enum {
@@ -87,7 +86,7 @@ void read_input( FILE *f, points_t *pset )
 {
     char buf[1024];
     int i, dim, npoints;
-    double *pointsx, *pointsy;
+    point_t *points;
 
     if ( 1 != fscanf(f, "%d", &dim) ) {
         fprintf(stderr, "FATAL: can not read dimension\n");
@@ -106,19 +105,16 @@ void read_input( FILE *f, points_t *pset )
         exit(EXIT_FAILURE);
     }
     assert(npoints > 2);
-    pointsx = (double*)malloc( npoints * sizeof(double) );
-    pointsy = (double*)malloc( npoints * sizeof(double) );
-    assert(pointsx);
-    assert(pointsy);
+    points = (point_t*)malloc( npoints * sizeof(*points) );
+    assert(points);
     for (i=0; i<npoints; i++) {
-        if (2 != fscanf(f, "%lf %lf", &(pointsx[i]), &(pointsy[i]))) {
+        if (2 != fscanf(f, "%lf %lf", &(points[i].x), &(points[i].y))) {
             fprintf(stderr, "FATAL: failed to get coordinates of point %d\n", i);
             exit(EXIT_FAILURE);
         }
     }
     pset->n = npoints;
-    pset->x = pointsx;
-    pset->y = pointsy;
+    pset->p = points;
 }
 
 /**
@@ -127,10 +123,8 @@ void read_input( FILE *f, points_t *pset )
 void free_pointset( points_t *pset )
 {
     pset->n = 0;
-    free(pset->x);
-    free(pset->y);
-    pset->x = NULL;
-    pset->y = NULL;
+    free(pset->p);
+    pset->p = NULL;
 }
 
 /**
@@ -146,18 +140,18 @@ void write_hull( FILE *f, const points_t *hull )
     int i;
     fprintf(f, "%d\n%d\n", 2, hull->n + 1);
     for (i=0; i<hull->n; i++) {
-        fprintf(f, "%f %f\n", hull->x[i], hull->y[i]);
+        fprintf(f, "%f %f\n", hull->p[i].x, hull->p[i].y);
     }
     /* write again the coordinates of the first point */
-    fprintf(f, "%f %f\n", hull->x[0], hull->y[0]);    
+    fprintf(f, "%f %f\n", hull->p[0].x, hull->p[0].y);
 }
 
 /**
- * Return LEFT, RIGHT or COLLINEAR depending on the shape
+ * Return LEFT, RIGHT or COLLINEAR depending on fthe shape
  * of the vectors p0p1 and p1p2
  *
  * LEFT            RIGHT           COLLINEAR
- * 
+ *
  *  p2              p1----p2            p2
  *    \            /                   /
  *     \          /                   /
@@ -169,19 +163,17 @@ void write_hull( FILE *f, const points_t *hull )
  * See Cormen, Leiserson, Rivest and Stein, "Introduction to Algorithms",
  * 3rd ed., MIT Press, 2009, Section 33.1 "Line-Segment properties"
  */
-int turn(const double p0x, const double p0y, 
-		const double p1x, const double p1y, 
-		const double p2x, const double p2y)
+int turn(const point_t p0, const point_t p1, const point_t p2)
 {
     /*
       This function returns the correct result (COLLINEAR) also in the
       following cases:
-      
+
       - p0==p1==p2
       - p0==p1
       - p1==p2
     */
-    const double cross = (p1x-p0x)*(p2y-p0y) - (p2x-p0x)*(p1y-p0y);
+    const double cross = (p1.x-p0.x)*(p2.y-p0.y) - (p2.x-p0.x)*(p1.y-p0.y);
     if (cross > 0.0) {
         return LEFT;
     } else {
@@ -194,12 +186,12 @@ int turn(const double p0x, const double p0y,
 }
 
 /**
- * Get the clockwise angle between the line p0p1 and the vector p1p2 
+ * Get the clockwise angle between the line p0p1 and the vector p1p2
  *
  *         .
- *        . 
- *       .--+ (this angle) 
- *      .   |    
+ *        .
+ *       .--+ (this angle)
+ *      .   |
  *     .    V
  *    p1--------------p2
  *    /
@@ -212,7 +204,7 @@ int turn(const double p0x, const double p0y,
 double cw_angle(const point_t p0, const point_t p1, const point_t p2)
 {
     const double x1 = p2.x - p1.x;
-    const double y1 = p2.y - p1.y;    
+    const double y1 = p2.y - p1.y;
     const double x2 = p1.x - p0.x;
     const double y2 = p1.y - p0.y;
     const double dot = x1*x2 + y1*y2;
@@ -221,161 +213,99 @@ double cw_angle(const point_t p0, const point_t p1, const point_t p2)
     return (result >= 0 ? result : 2*M_PI + result);
 }
 
+double distance_between(const point_t p0, const point_t p1) {
+  const double cateto_y = fabs((p1.y - p0.y));
+  const double cateto_x = fabs((p1.x - p0.x));
+  return sqrt( cateto_x*cateto_x + cateto_y*cateto_y );
+}
+
 /**
  * Compute the convex hull of all points in pset using the "Gift
  * Wrapping" algorithm. The vertices are stored in the hull data
  * structure, that does not need to be initialized by the caller.
  */
-void convex_hull(const points_t *pset, points_t *hull)
+void convex_hull(const points_t *pset, points_t *hull, point_t leftmost_point, int total_n, int my_rank, int comm_sz, MPI_Datatype MPI_point_t)
 {
     const int n = pset->n;
-    const double *x = pset->x, *y = pset->y;
-    points_t global_set;
-    int i, j;
-    int global_cur, global_next, global_leftmost, global_rightmost;
-    double size;
-    
-    global_set.n = 0;
-    global_set.x = (double *)malloc(n * sizeof(double));
-    global_set.y = (double *)malloc(n * sizeof(double));
+    const point_t *p = pset->p;
+    int j;
+    int next, master_next;
+    point_t cur_point;
 
-    hull->n = 0;
-    /* There can be at most n points in the convex hull. At the end of
-       this function we trim the excess space. */
-    hull->x = (double *)malloc(n * sizeof(double)); assert(hull->x);
-    hull->y = (double *)malloc(n * sizeof(double)); assert(hull->y);
-    
-    /* Identify the leftmost point p[leftmost] */
-    global_leftmost = 0;
-    global_rightmost = 0;
-    for (i = 1; i<n; i++) {
-        if (x[i] < x[global_leftmost]) {
-            global_leftmost = i;
-        }
-        if (x[i] > x[global_rightmost]) {
-			global_rightmost = i;
-		}
+    /*for (int i=0; i<n; i++) {
+        printf("Process %d point %f %f\n", my_rank, p[i].x, p[i].y);
+    }*/
+
+    if (0 == my_rank) {
+        hull->n = 0;
+        /* There can be at most n points in the convex hull. At the end of
+        this function we trim the excess space. */
+        hull->p = (point_t*)malloc(total_n * sizeof(*(hull->p))); assert(hull->p);
     }
-    size = x[global_rightmost] - x[global_leftmost];
-    
-#pragma omp parallel default(none) shared(x, y, global_leftmost, size, global_set) private(i, j)
-{
-	points_t local_set, local_hull;
-	int local_leftmost, local_cur, local_next;
-	double local_size, local_start, local_end;
-	
-	/* Define the limits of the local set. */
-	local_size = size / omp_get_num_threads();
-	local_start = local_size * omp_get_thread_num() + x[global_leftmost];
-	local_end = local_size * (omp_get_thread_num() + 1) + x[global_leftmost];
 
-	/* Create and fill the local set of points on which compute the hull. */
-	local_set.n = 0;
-	local_set.x = (double *)malloc(n * sizeof(double));
-	local_set.y = (double *)malloc(n * sizeof(double));
-
-	for (i=0; i<n; i++) {
-		if (x[i] > local_start && x[i] <= local_end) {
-			local_set.x[local_set.n] = x[i];
-			local_set.y[local_set.n] = y[i];
-			local_set.n++;
-		}
-		if (0 == omp_get_thread_num()) {
-			if (x[i] == local_start) {
-				local_set.x[local_set.n] = x[i];
-				local_set.y[local_set.n] = y[i];
-				local_set.n++;
-			}
-		}
-	}
-    
-    local_leftmost = 0;
-    for (i=1; i<local_set.n; i++) {
-		if (local_set.x[i] < local_set.x[local_leftmost]) {
-			local_leftmost = i;
-		}
-	}
-	local_cur = local_leftmost;
-
-	local_hull.n = 0;
-	local_hull.x = (double *)malloc(local_set.n * sizeof(double));
-	local_hull.y = (double *)malloc(local_set.n * sizeof(double));
-
-	printf("local(%d)\n", local_set.n);
+    /* Identify the leftmost point p[leftmost] */
+    cur_point.x = leftmost_point.x;
+    cur_point.y = leftmost_point.y;
 
     /* Main loop of the Gift Wrapping algorithm. This is where most of
        the time is spent; therefore, this is the block of code that
        must be parallelized. */
-    if (local_set.n > 0) {
-		do {
-			/* Add the current vertex to the hull */
-			assert(local_hull.n < local_set.n);
-			local_hull.x[local_hull.n] = local_set.x[local_cur];
-			local_hull.y[local_hull.n] = local_set.y[local_cur];
-			local_hull.n++;
-        
-			/* Search for the next vertex */
-			local_next = (local_cur + 1) % local_set.n;
-			for (j=0; j<local_set.n; j++) {
-				if (LEFT == turn(local_set.x[local_cur], local_set.y[local_cur], 
-								local_set.x[local_next], local_set.y[local_next],
-								local_set.x[j], local_set.y[j])) {
-					local_next = j;
-				}
-			}
-			//assert(local_cur != local_next);
-			local_cur = local_next;
-		} while (local_cur != local_leftmost);
-    }
+    do {
+        /* Add the current vertex to the hull */
+        if (0 == my_rank) {
+            assert(hull->n < total_n);
+            hull->p[hull->n].x = cur_point.x;
+            hull->p[hull->n].y = cur_point.y;
+            hull->n++;
+        }
 
-    /* Trim the excess space in the convex hull array */
-    local_hull.x = (double*)realloc(local_hull.x, local_hull.n * sizeof(double));
-    local_hull.y = (double*)realloc(local_hull.y, local_hull.n * sizeof(double));
-    //assert(local_hull.p);
-
-#pragma omp critical
-{
-	for (i=global_set.n; i<global_set.n+local_hull.n; i++) {
-		global_set.x[i] = local_hull.x[i - global_set.n];
-		global_set.y[i] = local_hull.y[i - global_set.n];
-	}
-	global_set.n += local_hull.n;
-}
-}
-
-	global_leftmost = 0;
-	for (i=0; i<global_set.n; i++) {
-		if (global_set.x[i] < global_set.x[global_leftmost]) {
-			global_leftmost = i;
-		}
-	}
-	global_cur = global_leftmost;
-
-	do {
-		/* Add the current vertex to the hull */
-        assert(hull->n < global_set.n);
-        hull->x[hull->n] = global_set.x[global_cur];
-        hull->y[hull->n] = global_set.y[global_cur];
-        hull->n++;
-        
         /* Search for the next vertex */
-        global_next = (global_cur + 1) % global_set.n;
-        for (j=0; j<global_set.n; j++) {
-            if (LEFT == turn(global_set.x[global_cur], global_set.y[global_cur],
-							global_set.x[global_next], global_set.y[global_next],
-							global_set.x[j], global_set.y[j])) {
-                global_next = j;
+        next = 0;
+        for (j=1; j<n; j++) {
+            if (LEFT == turn(cur_point, p[next], p[j]) || (cur_point.x == p[next].x && cur_point.y == p[next].y)) {
+                next = j;
             }
         }
-        assert(global_cur != global_next);
-        global_cur = global_next;
-	} while (global_cur != global_leftmost);
 
-	hull->x = (double *)realloc(hull->x, (hull->n) * sizeof(double));
-	hull->y = (double *)realloc(hull->y, (hull->n) * sizeof(double));
-	assert(hull->x);
-	assert(hull->y);
+	//printf("process %d found point %f %f\n", my_rank, p[next].x, p[next].y);
 
+        points_t master_currents;
+        master_currents.n = 0;
+        master_currents.p = NULL;
+        if (0 == my_rank) {
+            master_currents.n = comm_sz;
+            master_currents.p = (point_t *)malloc(sizeof(point_t) * master_currents.n);
+        }
+
+        MPI_Gather(&p[next], 1, MPI_point_t, master_currents.p, 1, MPI_point_t, 0, MPI_COMM_WORLD);
+
+        if (0 == my_rank) {
+            master_next = 0;
+            for (j=1; j<comm_sz; j++) {
+                if (LEFT == turn(cur_point, master_currents.p[master_next], master_currents.p[j])) {
+                    master_next = j;
+                }
+            }
+
+            assert(cur_point.x != master_currents.p[master_next].x || cur_point.y != master_currents.p[master_next].y);
+            cur_point = master_currents.p[master_next];
+
+            //printf("cur point: %f %f\n", cur_point.x, cur_point.y);
+
+
+            free(master_currents.p);
+        }
+
+        //MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Bcast(&cur_point, 1, MPI_point_t, 0, MPI_COMM_WORLD);
+
+    } while (cur_point.x != leftmost_point.x || cur_point.y != leftmost_point.y);
+
+    /* Trim the excess space in the convex hull array */
+    if (0 == my_rank) {
+        hull->p = (point_t*)realloc(hull->p, (hull->n) * sizeof(*(hull->p)));
+        assert(hull->p);
+    }
 }
 
 /**
@@ -390,13 +320,13 @@ void convex_hull(const points_t *pset, points_t *hull)
 double hull_volume( const points_t *hull )
 {
     const int n = hull->n;
-    const double *x = hull->x, *y = hull->y;
+    const point_t *p = hull->p;
     double sum = 0.0;
     int i;
     for (i=0; i<n-1; i++) {
-        sum += ( x[i] * y[i+1] - x[i+1] * y[i] );
+        sum += ( p[i].x * p[i+1].y - p[i+1].x * p[i].y );
     }
-    sum += x[n-1]*y[0] - x[0]*y[n-1];
+    sum += p[n-1].x*p[0].y - p[0].x*p[n-1].y;
     return 0.5*fabs(sum);
 }
 
@@ -408,33 +338,82 @@ double hull_volume( const points_t *hull )
 double hull_facet_area( const points_t *hull )
 {
     const int n = hull->n;
-    const double *x = hull->x, *y = hull->y;
+    const point_t *p = hull->p;
     double length = 0.0;
     int i;
     for (i=0; i<n-1; i++) {
-        length += hypot( x[i] - x[i+1], y[i] - y[i+1] );
+        length += hypot( p[i].x - p[i+1].x, p[i].y - p[i+1].y );
     }
     /* Add the n-th side connecting point n-1 to point 0 */
-    length += hypot( x[n-1] - x[0], y[n-1] - y[0] );
+    length += hypot( p[n-1].x - p[0].x, p[n-1].y - p[0].y );
     return length;
 }
 
-int main( void )
+int main(int argc, char *argv[])
 {
+    MPI_Init(&argc, &argv);
+    int my_rank, comm_sz;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &comm_sz);
+
+    MPI_Datatype MPI_point_t;
+    MPI_Type_contiguous(2, MPI_DOUBLE, &MPI_point_t);
+    MPI_Type_commit(&MPI_point_t);
+
     points_t pset, hull;
-    double tstart, elapsed;
-    
-    read_input(stdin, &pset);
-    tstart = hpc_gettime();
-    convex_hull(&pset, &hull);
-    elapsed = hpc_gettime() - tstart;
-    fprintf(stderr, "\nConvex hull of %d points in 2-d:\n\n", pset.n);
-    fprintf(stderr, "  Number of vertices: %d\n", hull.n);
-    fprintf(stderr, "  Total facet area: %f\n", hull_facet_area(&hull));
-    fprintf(stderr, "  Total volume: %f\n\n", hull_volume(&hull));
-    fprintf(stderr, "Elapsed time: %f\n\n", elapsed);
-    write_hull(stdout, &hull);
-    free_pointset(&pset);
-    free_pointset(&hull);
-    return EXIT_SUCCESS;    
+    double tstart = 0, elapsed = 0;
+    int leftmost = 0, n, local_n;
+    point_t leftmost_point;
+
+    if (0 == my_rank) {
+
+        read_input(stdin, &pset);
+        tstart = hpc_gettime();
+
+        for (int i = 1; i<pset.n; i++) {
+            if (pset.p[i].x < pset.p[leftmost].x) {
+                leftmost = i;
+            }
+        }
+        leftmost_point = pset.p[leftmost];
+        n = pset.n;
+    }
+
+    MPI_Bcast(&leftmost_point, 1, MPI_point_t, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&n, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    local_n = floor(n / comm_sz);
+
+    int *sendcnts = (int *)malloc(sizeof(int) * comm_sz);
+    int *displs = (int *)malloc(sizeof(int) * comm_sz);
+    for (int i=0; i<comm_sz-1; i++) {
+        sendcnts[i] = local_n;
+        displs[i] = sendcnts[i] * i;
+    }
+    sendcnts[comm_sz-1] = local_n + (n % comm_sz);
+    displs[comm_sz-1] = (comm_sz-1) * local_n;
+
+    points_t recvbuf;
+    recvbuf.n = my_rank == (comm_sz-1) ? local_n + (n % comm_sz) : local_n;
+    recvbuf.p = (point_t *)malloc(recvbuf.n * sizeof(point_t));
+
+    MPI_Scatterv(pset.p, sendcnts, displs, MPI_point_t, recvbuf.p, recvbuf.n, MPI_point_t, 0, MPI_COMM_WORLD);
+
+    convex_hull(&recvbuf, &hull, leftmost_point, pset.n, my_rank, comm_sz, MPI_point_t);
+
+    if (0 == my_rank) {
+        elapsed = hpc_gettime() - tstart;
+        fprintf(stderr, "\nConvex hull of %d points in 2-d:\n\n", pset.n);
+        fprintf(stderr, "  Number of vertices: %d\n", hull.n);
+        fprintf(stderr, "  Total facet area: %f\n", hull_facet_area(&hull));
+        fprintf(stderr, "  Total volume: %f\n", hull_volume(&hull));
+        fprintf(stdout, "Elapsed time: %f\n\n", elapsed);
+        write_hull(stdout, &hull);
+        free_pointset(&pset);
+        free_pointset(&hull);
+    }
+
+    MPI_Finalize();
+
+    return EXIT_SUCCESS;
 }

@@ -10,6 +10,6 @@ do
 	#echo $hullName
 	#echo $pngName
 
-	./omp-inner-hull < $inputName > $hullName
+	mpirun -n 7 mpi-hull < $inputName > $hullName
 	gnuplot -c plot-hull.gp $inputName $hullName $pngName
 done

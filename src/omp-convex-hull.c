@@ -55,7 +55,6 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <math.h>
-#include <mpi.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -77,8 +76,6 @@ enum {
     COLLINEAR,
     RIGHT
 };
-
-int my_rank, comm_sz;
 
 /**
  * Read input from file f, and store the set of points into the
@@ -149,7 +146,7 @@ void write_hull( FILE *f, const points_t *hull )
 }
 
 /**
- * Return LEFT, RIGHT or COLLINEAR depending on fthe shape
+ * Return LEFT, RIGHT or COLLINEAR depending on the shape
  * of the vectors p0p1 and p1p2
  *
  * LEFT            RIGHT           COLLINEAR
@@ -226,15 +223,14 @@ void convex_hull(const points_t *pset, points_t *hull)
     const point_t *p = pset->p;
     int i, j;
     int cur, next, leftmost;
-    /**point_t t1 = {1, 2};
-    point_t t2 = {4, 5};
-    point_t t3 = {10, 9};*/
+    int *local_next;
 
     hull->n = 0;
     /* There can be at most n points in the convex hull. At the end of
        this function we trim the excess space. */
     hull->p = (point_t*)malloc(n * sizeof(*(hull->p))); assert(hull->p);
-    
+    local_next = (int *)malloc(omp_get_max_threads() * sizeof(int)); assert(local_next);
+
     /* Identify the leftmost point p[leftmost] */
     leftmost = 0;
     for (i = 1; i<n; i++) {
@@ -247,7 +243,15 @@ void convex_hull(const points_t *pset, points_t *hull)
     /* Main loop of the Gift Wrapping algorithm. This is where most of
        the time is spent; therefore, this is the block of code that
        must be parallelized. */
+#pragma omp parallel default(none) shared(hull, p, leftmost, local_next, next, cur)  private(i, j)
+{
+	const int n_threads = omp_get_max_threads();
+	const int my_rank = omp_get_thread_num();
+	int my_next;
+
     do {
+#pragma omp master
+{
         /* Add the current vertex to the hull */
         assert(hull->n < n);
         hull->p[hull->n] = p[cur];
@@ -255,16 +259,33 @@ void convex_hull(const points_t *pset, points_t *hull)
         
         /* Search for the next vertex */
         next = (cur + 1) % n;
+}
+#pragma omp barrier
+		my_next = next;
+#pragma omp barrier
+#pragma omp for
         for (j=0; j<n; j++) {
-            if (LEFT == turn(p[cur], p[next], p[j])) {
-                next = j;
-                /**cw_angle(t1, t2, t3);*/
+            if (LEFT == turn(p[cur], p[my_next], p[j])) {
+                my_next = j;
             }
         }
+        local_next[my_rank] = my_next;
+#pragma omp barrier
+#pragma omp master
+{
+		for (j=0; j<n_threads; j++) {
+			if (LEFT == turn(p[cur], p[my_next], p[local_next[j]])) {
+				my_next = local_next[j];
+			}
+		}
+		next = my_next;
         assert(cur != next);
         cur = next;
+}
+#pragma omp barrier
     } while (cur != leftmost);
-    
+}
+	free(local_next);
     /* Trim the excess space in the convex hull array */
     hull->p = (point_t*)realloc(hull->p, (hull->n) * sizeof(*(hull->p)));
     assert(hull->p); 
@@ -311,31 +332,22 @@ double hull_facet_area( const points_t *hull )
     return length;
 }
 
-int main(int argc, char *argv[])
+int main( void )
 {
-    MPI_Init(&argc, &argv);
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &comm_sz);
-    printf("%d\n", my_rank);
+    points_t pset, hull;
+    double tstart, elapsed;
 
-    if (0 == my_rank) {
-        points_t pset, hull;
-        double tstart, elapsed;    
-        read_input(stdin, &pset);
-        tstart = hpc_gettime();
-        convex_hull(&pset, &hull);
-        elapsed = hpc_gettime() - tstart;
-        fprintf(stderr, "\nConvex hull of %d points in 2-d:\n\n", pset.n);
-        fprintf(stderr, "  Number of vertices: %d\n", hull.n);
-        fprintf(stderr, "  Total facet area: %f\n", hull_facet_area(&hull));
-        fprintf(stderr, "  Total volume: %f\n\n", hull_volume(&hull));
-        fprintf(stderr, "Elapsed time: %f\n\n", elapsed);
-        write_hull(stdout, &hull);
-        free_pointset(&pset);
-        free_pointset(&hull);
-    }
-    
-    MPI_Finalize();
-    
+    read_input(stdin, &pset);
+    tstart = hpc_gettime();
+    convex_hull(&pset, &hull);
+    elapsed = hpc_gettime() - tstart;
+    fprintf(stderr, "\nConvex hull of %d points in 2-d:\n\n", pset.n);
+    fprintf(stderr, "  Number of vertices: %d\n", hull.n);
+    fprintf(stderr, "  Total facet area: %f\n", hull_facet_area(&hull));
+    fprintf(stderr, "  Total volume: %f\n\n", hull_volume(&hull));
+    fprintf(stderr, "Elapsed time with %d threads: %f\n\n", omp_get_max_threads(), elapsed);
+    write_hull(stdout, &hull);
+    free_pointset(&pset);
+    free_pointset(&hull);
     return EXIT_SUCCESS;    
 }
